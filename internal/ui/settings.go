@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/textinput"
@@ -9,20 +10,25 @@ import (
 )
 
 type SettingsSavedMsg struct {
-	APIKey       string
-	BaseURL      string
-	DefaultModel string
-	ClearScreen  bool
-	Position     string
-	AccentColor  string
+	APIKey             string
+	BaseURL            string
+	DefaultModel       string
+	ClearScreen        bool
+	Position           string
+	AccentColor        string
+	CustomInstructions string
+	IncludeCWD         bool
+	MaxResponseLines   int
 }
 
-// settingsItem is either a group header or a text input field.
+// settingsItem is either a group header, a text input field, or a save button.
 type settingsItem struct {
-	label    string
-	isGroup  bool   // true = collapsible header, not an input
-	groupID  string // which group this input belongs to ("api" or "")
-	inputIdx int    // index into SettingsModel.inputs, -1 for group headers
+	label     string
+	hint      string // optional hint shown below the label
+	isGroup   bool   // true = collapsible header, not an input
+	isSaveBtn bool   // true = save button
+	groupID   string // which group this input belongs to ("api", "prompt", "display")
+	inputIdx  int    // index into SettingsModel.inputs, -1 for group headers/buttons
 }
 
 type SettingsModel struct {
@@ -37,13 +43,16 @@ const (
 	inputAPIKey = iota
 	inputBaseURL
 	inputModel
+	inputCustomInstructions
+	inputIncludeCWD
+	inputMaxResponseLines
 	inputClearScreen
 	inputPosition
 	inputAccentColor
 	inputCount
 )
 
-func NewSettingsModel(apiKey, baseURL, defaultModel string, clearScreen bool, position, accentColor string) SettingsModel {
+func NewSettingsModel(apiKey, baseURL, defaultModel, customInstructions string, includeCWD, clearScreen bool, position, accentColor string, maxResponseLines int) SettingsModel {
 	inputs := make([]textinput.Model, inputCount)
 
 	inputs[inputAPIKey] = textinput.New()
@@ -64,6 +73,22 @@ func NewSettingsModel(apiKey, baseURL, defaultModel string, clearScreen bool, po
 	inputs[inputModel].SetValue(defaultModel)
 	inputs[inputModel].CharLimit = 100
 	inputs[inputModel].Width = 50
+
+	inputs[inputCustomInstructions] = textinput.New()
+	inputs[inputCustomInstructions].Placeholder = "e.g. Always respond in Python, be extra brief..."
+	inputs[inputCustomInstructions].SetValue(customInstructions)
+	inputs[inputCustomInstructions].CharLimit = 500
+	inputs[inputCustomInstructions].Width = 50
+
+	cwdVal := "no"
+	if includeCWD {
+		cwdVal = "yes"
+	}
+	inputs[inputIncludeCWD] = textinput.New()
+	inputs[inputIncludeCWD].Placeholder = "yes/no"
+	inputs[inputIncludeCWD].SetValue(cwdVal)
+	inputs[inputIncludeCWD].CharLimit = 3
+	inputs[inputIncludeCWD].Width = 50
 
 	clearVal := "no"
 	if clearScreen {
@@ -93,21 +118,39 @@ func NewSettingsModel(apiKey, baseURL, defaultModel string, clearScreen bool, po
 	inputs[inputAccentColor].CharLimit = 7
 	inputs[inputAccentColor].Width = 50
 
+	if maxResponseLines <= 0 {
+		maxResponseLines = 8
+	}
+	inputs[inputMaxResponseLines] = textinput.New()
+	inputs[inputMaxResponseLines].Placeholder = "8"
+	inputs[inputMaxResponseLines].SetValue(fmt.Sprintf("%d", maxResponseLines))
+	inputs[inputMaxResponseLines].CharLimit = 3
+	inputs[inputMaxResponseLines].Width = 50
+
 	items := []settingsItem{
 		{label: "API Configuration", isGroup: true, groupID: "api", inputIdx: -1},
 		{label: "API Key", groupID: "api", inputIdx: inputAPIKey},
 		{label: "Base URL (Groq, OpenRouter, Ollama...)", groupID: "api", inputIdx: inputBaseURL},
 		{label: "Default Model", groupID: "api", inputIdx: inputModel},
-		{label: "Clear Screen (yes/no)", inputIdx: inputClearScreen},
-		{label: "Position (top/bottom)", inputIdx: inputPosition},
-		{label: "Accent Color (hex)", inputIdx: inputAccentColor},
+
+		{label: "Prompt & Context", isGroup: true, groupID: "prompt", inputIdx: -1},
+		{label: "Custom Instructions", groupID: "prompt", inputIdx: inputCustomInstructions},
+		{label: "Send Directory Context (yes/no)", hint: "Sends your current working directory to the model for relevant answers", groupID: "prompt", inputIdx: inputIncludeCWD},
+
+		{label: "Display", isGroup: true, groupID: "display", inputIdx: -1},
+		{label: "Max Response Lines", hint: "Lines shown before pager activates (default: 8)", groupID: "display", inputIdx: inputMaxResponseLines},
+		{label: "Clear Screen (yes/no)", groupID: "display", inputIdx: inputClearScreen},
+		{label: "Position (top/bottom)", groupID: "display", inputIdx: inputPosition},
+		{label: "Accent Color (hex)", groupID: "display", inputIdx: inputAccentColor},
+
+		{label: "Save & Exit", isSaveBtn: true, inputIdx: -1},
 	}
 
 	return SettingsModel{
 		inputs:   inputs,
 		items:    items,
 		cursor:   0,
-		expanded: map[string]bool{"api": false},
+		expanded: map[string]bool{"api": false, "prompt": false, "display": false},
 	}
 }
 
@@ -152,8 +195,7 @@ func (m SettingsModel) Update(msg tea.Msg) (SettingsModel, tea.Cmd) {
 				m.expanded[item.groupID] = !m.expanded[item.groupID]
 				return m, nil
 			}
-			// Last visible item → save
-			if m.cursor == len(visible)-1 {
+			if item.isSaveBtn {
 				return m, m.buildSaveMsg()
 			}
 			// Otherwise advance to next
@@ -189,6 +231,14 @@ func (m *SettingsModel) focusCurrent() tea.Cmd {
 }
 
 func (m SettingsModel) buildSaveMsg() tea.Cmd {
+	cwdVal := strings.TrimSpace(strings.ToLower(m.inputs[inputIncludeCWD].Value()))
+	includeCWD := cwdVal == "yes" || cwdVal == "y" || cwdVal == "true"
+
+	maxLines, err := strconv.Atoi(strings.TrimSpace(m.inputs[inputMaxResponseLines].Value()))
+	if err != nil || maxLines < 3 {
+		maxLines = 8
+	}
+
 	clearVal := strings.TrimSpace(strings.ToLower(m.inputs[inputClearScreen].Value()))
 	clearScreen := clearVal == "yes" || clearVal == "y" || clearVal == "true"
 
@@ -200,14 +250,58 @@ func (m SettingsModel) buildSaveMsg() tea.Cmd {
 
 	return func() tea.Msg {
 		return SettingsSavedMsg{
-			APIKey:       m.inputs[inputAPIKey].Value(),
-			BaseURL:      strings.TrimSpace(m.inputs[inputBaseURL].Value()),
-			DefaultModel: m.inputs[inputModel].Value(),
-			ClearScreen:  clearScreen,
-			Position:     pos,
-			AccentColor:  color,
+			APIKey:             m.inputs[inputAPIKey].Value(),
+			BaseURL:            strings.TrimSpace(m.inputs[inputBaseURL].Value()),
+			DefaultModel:       m.inputs[inputModel].Value(),
+			CustomInstructions: strings.TrimSpace(m.inputs[inputCustomInstructions].Value()),
+			IncludeCWD:         includeCWD,
+			MaxResponseLines:   maxLines,
+			ClearScreen:        clearScreen,
+			Position:           pos,
+			AccentColor:        color,
 		}
 	}
+}
+
+// groupSummary returns a short summary string for a collapsed group.
+func (m SettingsModel) groupSummary(groupID string) string {
+	switch groupID {
+	case "api":
+		model := m.inputs[inputModel].Value()
+		url := m.inputs[inputBaseURL].Value()
+		if url == "" {
+			url = "openai"
+		}
+		return fmt.Sprintf("%s @ %s", model, url)
+	case "prompt":
+		parts := []string{}
+		if ci := m.inputs[inputCustomInstructions].Value(); ci != "" {
+			if len(ci) > 30 {
+				ci = ci[:27] + "..."
+			}
+			parts = append(parts, fmt.Sprintf("\"%s\"", ci))
+		} else {
+			parts = append(parts, "no custom instructions")
+		}
+		cwdVal := strings.TrimSpace(strings.ToLower(m.inputs[inputIncludeCWD].Value()))
+		if cwdVal == "yes" || cwdVal == "y" || cwdVal == "true" {
+			parts = append(parts, "dir context on")
+		} else {
+			parts = append(parts, "dir context off")
+		}
+		return strings.Join(parts, " • ")
+	case "display":
+		clearVal := strings.TrimSpace(strings.ToLower(m.inputs[inputClearScreen].Value()))
+		pos := m.inputs[inputPosition].Value()
+		color := m.inputs[inputAccentColor].Value()
+		lines := m.inputs[inputMaxResponseLines].Value()
+		clear := "no"
+		if clearVal == "yes" || clearVal == "y" || clearVal == "true" {
+			clear = "yes"
+		}
+		return fmt.Sprintf("%s lines • clear: %s • %s • %s", lines, clear, pos, color)
+	}
+	return ""
 }
 
 func (m SettingsModel) View() string {
@@ -220,6 +314,15 @@ func (m SettingsModel) View() string {
 		item := m.items[itemIdx]
 		isCursor := vi == m.cursor
 
+		if item.isSaveBtn {
+			if isCursor {
+				b.WriteString(SelectedStyle.Render("  ▸ [ "+item.label+" ]") + "\n")
+			} else {
+				b.WriteString(DimStyle.Render("    [ "+item.label+" ]") + "\n")
+			}
+			continue
+		}
+
 		if item.isGroup {
 			arrow := "▸"
 			if m.expanded[item.groupID] {
@@ -231,13 +334,10 @@ func (m SettingsModel) View() string {
 				b.WriteString(DimStyle.Render(fmt.Sprintf("%s %s", arrow, item.label)) + "\n")
 			}
 			if !m.expanded[item.groupID] {
-				// Show a summary of current values
-				model := m.inputs[inputModel].Value()
-				url := m.inputs[inputBaseURL].Value()
-				if url == "" {
-					url = "openai"
+				summary := m.groupSummary(item.groupID)
+				if summary != "" {
+					b.WriteString(DimStyle.Render("    "+summary) + "\n")
 				}
-				b.WriteString(DimStyle.Render(fmt.Sprintf("    %s @ %s", model, url)) + "\n")
 			}
 			b.WriteString("\n")
 			continue
@@ -253,6 +353,12 @@ func (m SettingsModel) View() string {
 		} else {
 			b.WriteString(DimStyle.Render(fmt.Sprintf("%s  %s:", indent, item.label)) + "\n")
 		}
+
+		// Show hint if present
+		if item.hint != "" {
+			b.WriteString(DimStyle.Render(indent+"  "+item.hint) + "\n")
+		}
+
 		b.WriteString(indent + "  " + m.inputs[item.inputIdx].View() + "\n\n")
 	}
 

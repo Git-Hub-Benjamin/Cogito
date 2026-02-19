@@ -1,0 +1,46 @@
+version: 2
+
+project_name: cogito
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: cogito
+    main: .
+    binary: cogito
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - windows
+    goarch:
+      - amd64
+      - arm64
+
+archives:
+  - id: default
+    builds:
+      - cogito
+    format: tar.gz
+    format_overrides:
+      - goos: windows
+        format: zip
+    files:
+      - launch-cogito.sh
+
+checksum:
+  name_template: "checksums.txt"
+
+release:
+  draft: false
+  prerelease: auto
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"

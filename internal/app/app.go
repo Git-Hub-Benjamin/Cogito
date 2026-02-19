@@ -37,6 +37,8 @@ type Model struct {
 	err      error
 	hasError bool
 
+	lastQuery string
+
 	// topInline mode: top position without clear screen.
 	// Box is half-height and scroll is locked to keep render size fixed.
 	topInline bool
@@ -77,20 +79,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			contentWidth = 20
 		}
 		m.input.SetWidth(contentWidth)
-
-		// Determine usable height for the box
-		usableHeight := m.height
-		if m.topInline {
-			// Cap to half the terminal so old content stays visible below
-			usableHeight = m.height / 2
+		maxLines := m.config.MaxResponseLines
+		if maxLines <= 0 {
+			maxLines = ui.DefaultMaxCompactLines
 		}
-
-		// Reserve space for header, input, status bar
-		responseHeight := usableHeight - 8
-		if responseHeight < 3 {
-			responseHeight = 3
-		}
-		m.response.SetSize(contentWidth, responseHeight)
+		m.response.SetMaxLines(maxLines)
+		m.response.SetSize(contentWidth, maxLines)
 		return m, nil
 
 	case tea.KeyMsg:
@@ -101,10 +95,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, listenForChunks(m.streamCh, m.streamErrCh)
 
 	case streamDoneMsg:
-		m.state = StateInput
 		m.streamCh = nil
 		m.streamErrCh = nil
 		m.cancelFunc = nil
+		m.response.Finalize()
+		// Auto-enter pager if response overflows
+		if m.response.Overflows() {
+			m.state = StatePager
+			m.response.GotoTop()
+			m.input.Blur()
+			return m, nil
+		}
+		m.state = StateInput
 		return m, m.input.Focus()
 
 	case streamErrMsg:
@@ -123,6 +125,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.config.APIKeys["openai"] = msg.APIKey
 		m.config.BaseURL = msg.BaseURL
 		m.config.DefaultModel = msg.DefaultModel
+		m.config.CustomInstructions = msg.CustomInstructions
+		m.config.Context.IncludeCWD = msg.IncludeCWD
+		m.config.MaxResponseLines = msg.MaxResponseLines
 		m.config.ClearScreen = msg.ClearScreen
 		m.config.Position = msg.Position
 		m.config.Theme.AccentColor = msg.AccentColor
@@ -157,6 +162,12 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "enter":
 			return m.handleSubmit()
 		}
+		// Enter pager mode with ":" when input is empty and there's content to scroll
+		if msg.String() == ":" && m.input.Value() == "" && m.response.Overflows() {
+			m.state = StatePager
+			m.input.Blur()
+			return m, nil
+		}
 		var cmd tea.Cmd
 		m.input, cmd = m.input.Update(msg)
 		return m, cmd
@@ -172,13 +183,35 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "ctrl+c":
 			return m, tea.Quit
 		}
-		// In topInline mode, skip scroll keys to keep render height fixed
-		if m.topInline {
+		return m, nil
+
+	case StatePager:
+		switch msg.String() {
+		case "esc", "q":
+			m.state = StateInput
+			return m, m.input.Focus()
+		case "ctrl+c":
+			return m, tea.Quit
+		case " ":
+			m.response.PageDown()
+			return m, nil
+		case "b":
+			m.response.PageUp()
+			return m, nil
+		case "j", "down":
+			m.response.ScrollDown()
+			return m, nil
+		case "k", "up":
+			m.response.ScrollUp()
+			return m, nil
+		case "g":
+			m.response.GotoTop()
+			return m, nil
+		case "G":
+			m.response.GotoBottom()
 			return m, nil
 		}
-		var cmd tea.Cmd
-		m.response, cmd = m.response.Update(msg)
-		return m, cmd
+		return m, nil
 
 	case StateSettings:
 		switch msg.String() {
@@ -212,6 +245,7 @@ func (m Model) handleTabComplete() (tea.Model, tea.Cmd) {
 
 	if len(matches) == 1 {
 		m.input.SetValue(matches[0])
+		m.input.SetSuggestion("")
 	} else if len(matches) > 1 {
 		// Complete to longest common prefix
 		common := matches[0]
@@ -221,6 +255,8 @@ func (m Model) handleTabComplete() (tea.Model, tea.Cmd) {
 		if len(common) > len(val) {
 			m.input.SetValue(common)
 		}
+		// Show the rest of the first match as ghost text
+		m.input.SetSuggestion(matches[0][len(common):])
 	}
 
 	return m, nil
@@ -245,7 +281,10 @@ func (m Model) handleSubmit() (tea.Model, tea.Cmd) {
 	case query == "/settings":
 		m.settings = ui.NewSettingsModel(
 			m.config.APIKey(), m.config.BaseURL, m.config.DefaultModel,
+			m.config.CustomInstructions,
+			m.config.Context.IncludeCWD,
 			m.config.ClearScreen, m.config.Position, m.config.Theme.AccentColor,
+			m.config.MaxResponseLines,
 		)
 		contentWidth := m.width - 6
 		if contentWidth > 0 {
@@ -281,6 +320,7 @@ func (m Model) handleSubmit() (tea.Model, tea.Cmd) {
 	m.response.Clear()
 	m.hasError = false
 	m.state = StateStreaming
+	m.lastQuery = query
 	m.input.SetValue("")
 	m.input.Blur()
 
@@ -293,7 +333,7 @@ func (m Model) handleSubmit() (tea.Model, tea.Cmd) {
 	m.streamErrCh = errCh
 
 	messages := []provider.ChatMessage{
-		{Role: provider.RoleSystem, Content: buildSystemMsg(m.config.Context.IncludeCWD)},
+		{Role: provider.RoleSystem, Content: buildSystemMsg(m.config.Context.IncludeCWD, m.config.CustomInstructions)},
 		{Role: provider.RoleUser, Content: query},
 	}
 
@@ -309,8 +349,6 @@ func (m Model) updateSubmodels(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch m.state {
 	case StateInput:
 		m.input, cmd = m.input.Update(msg)
-	case StateStreaming:
-		m.response, cmd = m.response.Update(msg)
 	case StateSettings:
 		m.settings, cmd = m.settings.Update(msg)
 	}
@@ -327,7 +365,7 @@ func (m Model) View() string {
 		contentWidth = 20
 	}
 
-	title := ui.RenderHeader(m.config.DefaultModel)
+	title := ui.RenderHeader(m.config.DefaultModel, m.lastQuery, m.width)
 	topBorder := ui.RenderBorderTitle(title, m.width)
 
 	var content string
@@ -385,9 +423,20 @@ func (m Model) buildMainView(width int) string {
 
 	// Response area
 	if m.response.Content() != "" || m.state == StateStreaming {
-		responseView := m.response.View()
+		var responseView string
+		if m.response.Overflows() || m.state == StatePager || m.state == StateStreaming {
+			// Use fixed-height viewport for pager, streaming, and any overflowing content
+			responseView = m.response.PagerView()
+		} else {
+			// Use compact raw content only for short responses
+			responseView = m.response.View()
+		}
 		if m.state == StateStreaming {
-			responseView += m.spinner.View()
+			if m.response.Content() == "" {
+				responseView = m.spinner.View()
+			} else {
+				responseView += m.spinner.View()
+			}
 		}
 		parts = append(parts, responseView)
 	}
@@ -397,8 +446,14 @@ func (m Model) buildMainView(width int) string {
 		parts = append(parts, ui.ErrorStyle.Render("Error: "+m.err.Error()))
 	}
 
-	// Input
-	parts = append(parts, m.input.View())
+	// Input / Pager prompt
+	if m.state == StatePager {
+		pagerPrompt := ui.DimStyle.Render(":") + " " +
+			ui.DimStyle.Render(m.response.ScrollPercent())
+		parts = append(parts, pagerPrompt)
+	} else {
+		parts = append(parts, m.input.View())
+	}
 
 	// Status bar
 	status := m.statusBar()
@@ -406,15 +461,21 @@ func (m Model) buildMainView(width int) string {
 		parts = append(parts, ui.StatusBarStyle.Render(status))
 	}
 
-	return strings.Join(parts, "\n\n")
+	return strings.Join(parts, "\n")
 }
 
 func (m Model) statusBar() string {
 	switch m.state {
 	case StateStreaming:
 		return "Streaming... (esc to cancel)"
+	case StatePager:
+		return "space next • b back • j/k scroll • g/G top/bottom • esc/q exit"
 	default:
-		return "/help commands • /settings configure • esc quit"
+		hint := "/help commands • /settings configure • esc quit"
+		if m.response.Overflows() {
+			hint = ": scroll response • " + hint
+		}
+		return hint
 	}
 }
 
@@ -439,6 +500,6 @@ Shortcuts:
   Esc         - Quit (or cancel streaming)`
 }
 
-func buildSystemMsg(includeCWD bool) string {
-	return shellctx.BuildSystemMessage(includeCWD)
+func buildSystemMsg(includeCWD bool, customInstructions string) string {
+	return shellctx.BuildSystemMessage(includeCWD, customInstructions)
 }

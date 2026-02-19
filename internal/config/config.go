@@ -6,15 +6,17 @@ import (
 )
 
 type Config struct {
-	Provider        string            `json:"provider"`
-	APIKeys         map[string]string `json:"api_keys"`
-	BaseURL         string            `json:"base_url"`
-	DefaultModel    string            `json:"default_model"`
-	AvailableModels []string          `json:"available_models"`
-	Theme           ThemeConfig       `json:"theme"`
-	Context         ContextConfig     `json:"context"`
-	ClearScreen     bool              `json:"clear_screen"`
-	Position        string            `json:"position"`
+	Provider           string            `json:"provider"`
+	APIKeys            map[string]string `json:"api_keys"`
+	BaseURL            string            `json:"base_url"`
+	DefaultModel       string            `json:"default_model"`
+	AvailableModels    []string          `json:"available_models"`
+	Theme              ThemeConfig       `json:"theme"`
+	Context            ContextConfig     `json:"context"`
+	ClearScreen        bool              `json:"clear_screen"`
+	Position           string            `json:"position"`
+	CustomInstructions string            `json:"custom_instructions"`
+	MaxResponseLines   int               `json:"max_response_lines"`
 }
 
 type ThemeConfig struct {
@@ -42,8 +44,9 @@ func DefaultConfig() Config {
 			IncludeCWD:          true,
 			IncludeShellHistory: false,
 		},
-		ClearScreen: false,
-		Position:    "bottom",
+		ClearScreen:      false,
+		Position:         "bottom",
+		MaxResponseLines: 8,
 	}
 }
 

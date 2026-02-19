@@ -6,4 +6,5 @@ const (
 	StateInput    AppState = iota
 	StateStreaming
 	StateSettings
+	StatePager
 )
